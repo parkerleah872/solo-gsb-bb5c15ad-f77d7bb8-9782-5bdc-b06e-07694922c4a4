@@ -19,6 +19,7 @@ const {
   MAX_TOTAL_GEARS,
 } = require('./procure');
 const { planDualSpeed, MIN_GEARS: MIN_DUAL_GEARS } = require('./dual');
+const { planTorque, validateTorqueGears, parsePositiveInt, MAX_TORQUE } = require('./torque');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -39,6 +40,11 @@ app.get('/procure', (_req, res) => {
 /** 友好访问双档换速页：/dual-speed → /dual-speed.html */
 app.get('/dual-speed', (_req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'dual-speed.html'));
+});
+
+/** 友好访问带载安全选配页：/torque → /torque.html */
+app.get('/torque', (_req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'torque.html'));
 });
 
 /** BigInt 分数安全转为有限小数（用于前端展示） */
@@ -73,6 +79,32 @@ function serializeSolution(r) {
     pairs: r.pairs.map((p) => ({
       drive: p.drive,
       driven: p.driven,
+      stageRatio: serializeFrac(p.stageRatio),
+    })),
+  };
+}
+
+/** 带载方案：每级两轮的承受扭矩（分数 + 小数）与正整数额定扭矩一并序列化 */
+function serializeTorqueGear(g) {
+  return {
+    id: g.id,
+    teeth: g.teeth,
+    ratedTorque: g.ratedTorque,
+    torque: serializeFrac(g.torque),
+    atLimit: g.torque.num === BigInt(g.ratedTorque) * g.torque.den,
+  };
+}
+
+function serializeTorqueSolution(r) {
+  return {
+    stages: r.stages,
+    ratio: serializeFrac(r.ratio),
+    error: serializeFrac(r.error),
+    errorPercent: fracToDecimal({ num: r.error.num * 100n, den: r.error.den }, 6),
+    pairs: r.pairs.map((p) => ({
+      inputTorque: serializeFrac(p.inputTorque),
+      drive: serializeTorqueGear(p.drive),
+      driven: serializeTorqueGear(p.driven),
       stageRatio: serializeFrac(p.stageRatio),
     })),
   };
@@ -349,10 +381,88 @@ app.post('/api/dual-speed', (req, res) => {
   });
 });
 
+app.post('/api/torque', (req, res) => {
+  const body = req.body || {};
+
+  const target = parseTarget(String(body.target ?? ''));
+  if (!target) {
+    return res.status(400).json({ error: '目标输出转速比格式不正确：请输入正数（如 0.0833、1/12）' });
+  }
+
+  const tolerance = parseTolerance(String(body.tolerance ?? ''));
+  if (!tolerance) {
+    return res.status(400).json({ error: '允许相对误差格式不正确：请输入非负数（如 0.05 或 5%）' });
+  }
+
+  const checkedTorque = parsePositiveInt(body.inputTorque, '输入扭矩');
+  if (!checkedTorque.ok) return res.status(400).json({ error: checkedTorque.error });
+  const inputTorque = BigInt(checkedTorque.value);
+
+  const checked = validateTorqueGears(body.gears);
+  if (!checked.ok) return res.status(400).json({ error: checked.error });
+
+  // 完整枚举速比配对组后，对每组配对的全部级次顺序分别做扭矩校核（不截断）
+  const plan = planTorque(checked.gears, target, tolerance, inputTorque);
+
+  const base = {
+    target: serializeFrac(target),
+    tolerance: serializeFrac(tolerance),
+    maxStages: MAX_STAGES,
+    inputTorque: checkedTorque.value,
+    maxTorque: MAX_TORQUE,
+    ratioMatchCount: plan.ratioMatchCount,
+    loadCandidatesChecked: plan.loadCandidatesChecked,
+  };
+
+  // 区分“速比无解”与“速比有解但全部超载”
+  if (plan.ratioMatchCount === 0) {
+    return res.json({
+      ...base,
+      feasible: false,
+      reason: 'ratio',
+      total: 0,
+      truncated: false,
+      count: 0,
+      results: [],
+      message:
+        '速比无解：在 1～3 级传动、每枚齿轮至多使用一次的限制下，' +
+        '所有组合的实际转速比相对误差均超出允许范围，未进入扭矩校核。' +
+        '可尝试放宽误差、调整目标速比或增加齿轮。',
+    });
+  }
+
+  if (plan.total === 0) {
+    return res.json({
+      ...base,
+      feasible: false,
+      reason: 'overload',
+      total: 0,
+      truncated: false,
+      count: 0,
+      results: [],
+      message:
+        `全部超载：共有 ${plan.ratioMatchCount} 组速比达标的配对，其全部 ${plan.loadCandidatesChecked} 种级次顺序` +
+        '（同一组配对的各级排列已分别校核）都至少有一枚齿轮的承受扭矩超过其额定值。' +
+        '可尝试降低输入扭矩、提高相关齿轮的额定扭矩或增加可选齿轮。',
+    });
+  }
+
+  res.json({
+    ...base,
+    feasible: true,
+    reason: 'ok',
+    total: plan.total,
+    truncated: plan.truncated,
+    count: plan.results.length,
+    results: plan.results.map(serializeTorqueSolution),
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`齿轮组选配服务已启动： http://localhost:${PORT}`);
   console.log(`  单台选配： http://localhost:${PORT}/`);
   console.log(`  批量装配： http://localhost:${PORT}/batch`);
   console.log(`  缺齿补货： http://localhost:${PORT}/procure`);
   console.log(`  双档换速： http://localhost:${PORT}/dual-speed`);
+  console.log(`  带载安全： http://localhost:${PORT}/torque`);
 });
