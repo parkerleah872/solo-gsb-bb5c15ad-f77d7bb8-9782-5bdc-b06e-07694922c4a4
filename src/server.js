@@ -19,6 +19,7 @@ const {
   MAX_TOTAL_GEARS,
 } = require('./procure');
 const { planDualSpeed, MIN_GEARS: MIN_DUAL_GEARS } = require('./dual');
+const { searchLoad, validateLoadGears, MAX_TORQUE } = require('./torque');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -39,6 +40,11 @@ app.get('/procure', (_req, res) => {
 /** 友好访问双档换速页：/dual-speed → /dual-speed.html */
 app.get('/dual-speed', (_req, res) => {
   res.sendFile(path.join(__dirname, '..', 'public', 'dual-speed.html'));
+});
+
+/** 友好访问带载安全选配页：/torque → /torque.html */
+app.get('/torque', (_req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'torque.html'));
 });
 
 /** BigInt 分数安全转为有限小数（用于前端展示） */
@@ -74,6 +80,23 @@ function serializeSolution(r) {
       drive: p.drive,
       driven: p.driven,
       stageRatio: serializeFrac(p.stageRatio),
+    })),
+  };
+}
+
+/** 带载方案序列化：在单台结构基础上补充每级两轮的承受扭矩与额定扭矩 */
+function serializeLoadSolution(r) {
+  return {
+    stages: r.stages,
+    ratio: serializeFrac(r.ratio),
+    error: serializeFrac(r.error),
+    errorPercent: fracToDecimal({ num: r.error.num * 100n, den: r.error.den }, 6),
+    pairs: r.pairs.map((p) => ({
+      drive: p.drive,
+      driven: p.driven,
+      stageRatio: serializeFrac(p.stageRatio),
+      driveTorque: serializeFrac(p.driveTorque),
+      drivenTorque: serializeFrac(p.drivenTorque),
     })),
   };
 }
@@ -349,10 +372,56 @@ app.post('/api/dual-speed', (req, res) => {
   });
 });
 
+app.post('/api/torque', (req, res) => {
+  const body = req.body || {};
+
+  // 目标速比 / 容差：与单台选配完全一致的解析与提示
+  const target = parseTarget(String(body.target ?? ''));
+  if (!target) {
+    return res.status(400).json({ error: '目标输出转速比格式不正确：请输入正数（如 0.0833、1/12）' });
+  }
+
+  const tolerance = parseTolerance(String(body.tolerance ?? ''));
+  if (!tolerance) {
+    return res.status(400).json({ error: '允许相对误差格式不正确：请输入非负数（如 0.05 或 5%）' });
+  }
+
+  // 输入扭矩：正整数（N·m）
+  const inputTorque = Number(body.inputTorque);
+  if (!Number.isInteger(inputTorque) || inputTorque < 1 || inputTorque > MAX_TORQUE) {
+    return res.status(400).json({ error: `输入扭矩需为 1~${MAX_TORQUE} 的正整数（单位 N·m）` });
+  }
+
+  // 齿轮：2～12 枚，每枚带正整数额定扭矩
+  const checked = validateLoadGears(body.gears);
+  if (!checked.ok) return res.status(400).json({ error: checked.error });
+
+  // 基于完整枚举的速比达标配对展开全部级次顺序逐一校核载荷（不截断）
+  const { ratioTotal, total, truncated, results } = searchLoad(
+    checked.gears,
+    target,
+    tolerance,
+    inputTorque,
+  );
+
+  res.json({
+    target: serializeFrac(target),
+    tolerance: serializeFrac(tolerance),
+    inputTorque,
+    maxStages: MAX_STAGES,
+    ratioTotal,
+    total,
+    truncated,
+    count: results.length,
+    results: results.map(serializeLoadSolution),
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`齿轮组选配服务已启动： http://localhost:${PORT}`);
   console.log(`  单台选配： http://localhost:${PORT}/`);
   console.log(`  批量装配： http://localhost:${PORT}/batch`);
   console.log(`  缺齿补货： http://localhost:${PORT}/procure`);
   console.log(`  双档换速： http://localhost:${PORT}/dual-speed`);
+  console.log(`  带载安全： http://localhost:${PORT}/torque`);
 });

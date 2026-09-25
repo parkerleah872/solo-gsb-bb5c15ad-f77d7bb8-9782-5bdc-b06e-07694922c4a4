@@ -22,6 +22,13 @@
 第二级按档换装（两档互斥运行，换装级可使用相同实物齿轮），
 按“需更换轴位最少 → 两档相对误差之和最小 → 齿轮编号自然序”选出唯一方案。
 
+另支持**带载安全选配**：在单台选配的速比与容差规则之上，额外输入正整数
+**输入扭矩**与每枚齿轮的正整数**额定扭矩**（单位 N·m），按**无损传动**逐级校核——
+每级主动轮承受该级输入扭矩，从动轮承受 输入扭矩 × 从动齿数 / 主动齿数
+并作为下一级输入，两轮承受值均不得超过各自额定值；同一配对的**不同级次顺序
+分别校核、分别计数**，返回速比与载荷均达标的方案总数与前 300 条，
+并区分“速比无解”与“全部超载”两种无解情形。
+
 ## 一键启动（Docker Compose，自动安装依赖并构建）
 
 ```bash
@@ -36,6 +43,7 @@ docker compose up --build
 | 批量装配（2～3 台） | **http://localhost:3000/batch**（或 `/batch.html`） |
 | 缺齿补货采购建议（2 台） | **http://localhost:3000/procure**（或 `/procure.html`） |
 | 双档换速（固定一级 + 换装一级） | **http://localhost:3000/dual-speed**（或 `/dual-speed.html`） |
+| 带载安全选配（扭矩校核） | **http://localhost:3000/torque**（或 `/torque.html`） |
 
 后台运行可用 `docker compose up --build -d`，停止用 `docker compose down`。
 
@@ -49,7 +57,8 @@ npm start
 ```
 
 访问 http://localhost:3000 ，批量装配页 http://localhost:3000/batch ，
-缺齿补货页 http://localhost:3000/procure ，双档换速页 http://localhost:3000/dual-speed 。
+缺齿补货页 http://localhost:3000/procure ，双档换速页 http://localhost:3000/dual-speed ，
+带载安全页 http://localhost:3000/torque 。
 
 ## 必要配置（环境变量）
 
@@ -58,9 +67,10 @@ npm start
 | `PORT` | 容器内服务监听端口（一般无需修改） | `3000` |
 | `APP_PORT` | Compose 映射到宿主机的端口，按需覆盖，例如 `APP_PORT=8080 docker compose up --build` | `3000` |
 
-两个变量控制同一服务端口，四个页面共用；例如改用宿主机 8080 端口后，访问
+两个变量控制同一服务端口，五个页面共用；例如改用宿主机 8080 端口后，访问
 http://localhost:8080 （单台）、http://localhost:8080/batch （批量）、
-http://localhost:8080/procure （缺齿补货）与 http://localhost:8080/dual-speed （双档换速）：
+http://localhost:8080/procure （缺齿补货）、http://localhost:8080/dual-speed （双档换速）
+与 http://localhost:8080/torque （带载安全）：
 
 ```bash
 APP_PORT=8080 docker compose up --build
@@ -150,6 +160,28 @@ APP_PORT=8080 docker compose up --build
 3. 再并列时按（固定主动 → 固定从动 → 档位一换装主动 → 档位一换装从动 →
    档位二换装主动 → 档位二换装从动）的齿轮编号**自然序**序列决胜
    （`G2` 排在 `G10` 之前）。
+
+## 使用说明 — 带载安全选配（扭矩校核）
+
+1. 在顶部导航进入 **带载安全**（`/torque`）。
+2. 填写**目标输出转速比**与**允许相对误差**（规则同单台选配）。
+3. 填写**输入扭矩**：正整数，单位 N·m，作用于第一级主动轮。
+4. 录入 2～12 枚齿轮：每行一个**唯一编号**、**正整数齿数**与**正整数额定扭矩**（N·m）。
+5. 点击“开始带载选配”，系统在**全部**速比达标配对（完整枚举，不截断）上展开
+   **全部级次顺序**并逐一校核载荷：
+   - 每级主动轮承受该级输入扭矩；
+   - 每级从动轮承受 该级输入扭矩 × 从动齿数 / 主动齿数（无损传动、功率守恒），
+     该值同时作为下一级的输入扭矩；
+   - 任一级任一轮的承受值超过其额定扭矩，该级次顺序即判为超载。
+6. 结果区展示**速比与载荷均达标**的方案总数与前 300 条
+   （排序：级数最少 → 相对误差最小 → 级次编号自然序），
+   每条列出每级两轮的承受扭矩（精确分数 + 小数）与各自额定值。
+7. 无解时区分两种情形并明确提示：**速比无解**（没有任何组合满足速比与容差）与
+   **全部超载**（存在速比达标方案，但所有级次顺序下均有齿轮超载）。
+
+> 同一组配对（相同齿轮、相同朝向）仅级次顺序不同的方案，速比相同但扭矩传递链不同，
+> 因此分别校核、分别计数、分别参与排序；不会沿用单台搜索的“级序去重”结果，
+> 也不会用前 300 条截断结果代替完整候选。
 
 ## HTTP 接口
 
@@ -269,11 +301,43 @@ APP_PORT=8080 docker compose up --build
 - 速比、容差与齿轮校验规则与其他接口完全一致（精确分数判定）；
   择优基于**完整候选**，不受 `/api/search` 300 条返回上限影响。
 
+### `POST /api/torque`（带载安全选配）
+
+```json
+{
+  "target": "1/12",
+  "tolerance": "5%",
+  "inputTorque": 50,
+  "gears": [
+    { "id": "G1", "teeth": 10, "ratedTorque": 120 },
+    { "id": "G8", "teeth": 60, "ratedTorque": 800 }
+  ]
+}
+```
+
+- `target` / `tolerance` / `gears` 的数量与校验规则同 `/api/search`（2～12 枚、编号唯一）；
+  每枚齿轮额外要求**正整数** `ratedTorque`（N·m）；`inputTorque` 为**正整数**（N·m）。
+- 扭矩按**无损传动**逐级传递：每级主动轮承受该级输入扭矩，从动轮承受
+  输入扭矩 × 从动齿数 / 主动齿数，并作为下一级输入；
+  两轮承受值均不得超过各自额定值（精确分数交叉相乘判定）。
+- 同一配对的**不同级次顺序分别校核、分别计数**；校核基于完整枚举，
+  **不**使用单台搜索的级序去重结果或前 300 条截断结果代替完整候选。
+- 返回：
+  - `ratioTotal`：仅速比达标的方案数（级次顺序分别计数，与 `total` 口径一致）；
+  - `total`：速比与载荷均达标的方案总数；`results` 按 级数 → 误差 → 级次编号自然序
+    排序后最多返回 300 条（`truncated: true` 表示已截断）；
+  - 每条 `pairs[]` 在单台结构基础上额外给出 `driveTorque` / `drivenTorque`
+    （该级两轮各自承受的扭矩，分数 + 小数）与每枚齿轮的 `ratedTorque`；
+  - `total: 0` 时按 `ratioTotal` 区分无解原因：`ratioTotal: 0` 为**速比无解**，
+    `ratioTotal > 0` 为**全部超载**。
+
 ## 计算与排序规则
 
 - 每级转速比 = 主动轮齿数 / 从动轮齿数；总速比 = 各级速比之积（全程约分分数）。
 - 相对误差 = |实际速比 − 目标速比| / 目标速比，同样以分数比较，达标条件：相对误差 ≤ 允许值。
 - “仅各级排列顺序不同”的同一配对方案只保留一条（按主动轮编号归一化）。
+  例外：带载安全选配中级次顺序影响扭矩传递链，同一配对的不同级次顺序
+  作为不同方案分别校核、计数与排序。
 - 并列方案按各级 (主动轮编号, 从动轮编号) 序列做自然序比较（`G2` 排在 `G10` 之前）。
 - 12 枚齿轮最坏情况枚举约 10 万量级方案，秒级完成。
 
@@ -282,22 +346,25 @@ APP_PORT=8080 docker compose up --build
 ```
 .
 ├── Dockerfile              # 多平台 Node 20 Alpine 镜像，构建时安装依赖
-├── docker-compose.yml      # 一键启动服务（四个页面同端口）
+├── docker-compose.yml      # 一键启动服务（五个页面同端口）
 ├── package.json
 ├── src
-│   ├── server.js           # Express 服务：静态页面 + /api/search + /api/batch + /api/procure + /api/dual-speed
+│   ├── server.js           # Express 服务：静态页面 + /api/search + /api/batch + /api/procure + /api/dual-speed + /api/torque
 │   ├── search.js           # 精确分数搜索算法（BigInt）：完整枚举与单台搜索
 │   ├── batch.js            # 批量装配：按集合留优 + 互不冲突组合的分支限界搜索
 │   ├── procure.js          # 缺齿补货：枚举可购子集，复用批量装配的候选分配与规则
-│   └── dual.js             # 双档换速：共用固定第一级 + 按档换装第二级的完整枚举与择优
+│   ├── dual.js             # 双档换速：共用固定第一级 + 按档换装第二级的完整枚举与择优
+│   └── torque.js           # 带载安全：级次顺序全展开 + 无损传动扭矩校核
 └── public
     ├── index.html          # 单台选配页面
     ├── batch.html          # 批量装配页面（/batch）
     ├── procure.html        # 缺齿补货采购建议页面（/procure）
     ├── dual-speed.html     # 双档换速页面（/dual-speed）
+    ├── torque.html         # 带载安全选配页面（/torque）
     ├── styles.css
     ├── app.js              # 单台页脚本
     ├── batch.js            # 批量页脚本
     ├── procure.js          # 补货页脚本
-    └── dual-speed.js       # 双档换速页脚本
+    ├── dual-speed.js       # 双档换速页脚本
+    └── torque.js           # 带载安全页脚本
 ```
